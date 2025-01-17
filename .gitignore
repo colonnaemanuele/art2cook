@@ -1,5 +1,18 @@
+# Files types
+*.mp3
+*.mp4
+*.wav
+*.png
+*.jpg
+*.jpeg
 *.safetensors
 *.pth
+
+# Virtual Environment
+.venv
+
+# Specific Files
+art2cook_servacc.json
 
 # Avoid pushing wandb logs
 wandb/*

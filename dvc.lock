@@ -1,0 +1,36 @@
+schema: '2.0'
+stages:
+  extract:
+    cmd: python src/data/extract_data.py
+    deps:
+    - path: data/raw/art2cook_data.zip
+      hash: md5
+      md5: 0b1f0dc27553e429cc9d7cb65b9d2928
+      size: 90863556
+    - path: src/data/extract_data.py
+      hash: md5
+      md5: 801c53f4202f28fce147049cdeb70626
+      size: 2434
+    outs:
+    - path: data/audio/fma_large
+      hash: md5
+      md5: dfe433ee7684beb3e06f4ceaadeae930.dir
+      size: 93815642
+      nfiles: 100
+    - path: data/extra/audios.safetensors
+      hash: md5
+      md5: fb4028a0ddecabbb885e07ae4d854441
+      size: 417456
+    - path: data/extra/image_audio_subset_df.json
+      hash: md5
+      md5: 34bf961501f49e0411a04c7b4757bf93
+      size: 12365
+    - path: data/extra/images.safetensors
+      hash: md5
+      md5: eed92e1287a498ad9c237e26623f8e61
+      size: 420816
+    - path: data/images/imagesf2
+      hash: md5
+      md5: 3c2f4bcfb3a8e804c576355e25712bab.dir
+      size: 1316710
+      nfiles: 100

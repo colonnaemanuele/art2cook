@@ -1,0 +1,17 @@
+stages:
+  extract:
+    cmd: python src/data/extract_data.py
+    deps:
+      - src/data/extract_data.py
+      - data/raw/art2cook_data.zip
+    outs:
+      - data/extra/audios.safetensors:
+          cache: false
+      - data/extra/images.safetensors:
+          cache: false
+      - data/extra/image_audio_subset_df.json:
+          cache: false
+      - data/audio/fma_large:
+          cache: false
+      - data/images/imagesf2:
+          cache: false
