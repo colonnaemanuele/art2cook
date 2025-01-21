@@ -98,7 +98,7 @@ class TrainingConfig:
     guidance_scale: float = 3.5
     audio_duration: int = 10 
     
-    set_wandb_offline: bool = False
+    set_wandb_offline: bool = True
     
     # ------- Training and Validation Stuff -------
     num_epochs: int = 5

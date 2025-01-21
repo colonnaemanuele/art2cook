@@ -5,3 +5,7 @@
 wandb/*
 
 __pycache__/
+
+.venv/
+venv/
+mlruns/

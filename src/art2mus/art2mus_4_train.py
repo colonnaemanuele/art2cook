@@ -100,7 +100,10 @@ LAYER_WEIGHTS = tu.IMG_PROJ_LAYER_WEIGHTS
 
 CUSTOM_PIPE = tu.CUSTOM_PIPE_2
 
+import mlflow.pytorch
+
 def main():
+    mlflow.pytorch.autolog()
     
     if is_wandb_available():
         import wandb
@@ -200,7 +203,7 @@ def main():
 
     accelerator = Accelerator(gradient_accumulation_steps=TRAIN_CONFIG.gradient_accumulation_steps,
                               project_config=accelerator_project_conf,
-                              log_with="wandb",
+                              log_with="mlflow",
                               cpu=use_cpu,
                               )
 
