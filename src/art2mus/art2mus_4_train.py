@@ -504,6 +504,7 @@ def main():
                     """ --- Convert audio to latent space --- """
                     # Compute mel-spectrogram of the audio (this is our ground truth)
                     try:
+                        # TODO: #1
                         mel, _, _ = tt.wav_to_fbank(audio_path, target_length, stft)
                     except Exception as e:
                         print(f"Issues with {audio_path}: {e}")
@@ -517,6 +518,7 @@ def main():
                     """ --- Latents Computation --- """
                     # Compute latents starting from the mel-spectrogram
                     with torch.no_grad():
+                        # TODO: #2
                         latents = pipe.vae.encode(mel).latent_dist.sample()
                     latents = latents * pipe.vae.config.scaling_factor
 
@@ -535,6 +537,7 @@ def main():
                     noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
                     noisy_latents = noisy_latents.to(device=device)
                     
+                    # TODO: #3
                     """ --- Noise Generation Procedure --- """
                     generated_noise, _ = pipe.__train__(
                         image_embeds=image_emb,
@@ -545,6 +548,7 @@ def main():
                         timesteps=timesteps,
                     )
 
+                    # TODO: #4
                     """ --- Loss Computation --- """
                     if not use_snr_gamma:
                         """
@@ -605,6 +609,7 @@ def main():
                         loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                         loss = loss.mean()
                         
+                    # TODO: #5
                     # Gather losses across all processes for logging (if distributed training is used)
                     avg_loss = accelerator.gather(loss.repeat(BATCH_SIZE)).mean()
                     # Update step and epoch loss

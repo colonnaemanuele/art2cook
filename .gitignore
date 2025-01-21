@@ -11,5 +11,7 @@ __pycache__/
 
 data/*
 
+.dvc
+
 .metaflow/
 launch.json

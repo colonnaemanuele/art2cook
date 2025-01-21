@@ -1254,6 +1254,8 @@ class AudioLDM2Pipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
                             
+        
+        # TODO: 
         # 5. Encode input prompt
         input_embeds, attention_mask, generated_prompt_embeds = self.encode_prompt(
             device,
