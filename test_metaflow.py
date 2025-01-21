@@ -7,15 +7,85 @@ from src.art2mus.art2mus_4_train import (
     IMAGE_ST,
 )
 
+import os
+import sys
+import math
+import scipy
+import shutil
+import logging
+from PIL import Image
+from tqdm.auto import tqdm
+from datetime import datetime
+# Diffusers
+from diffusers.utils import is_wandb_available
+from diffusers.training_utils import compute_snr
+from diffusers.optimization import get_scheduler
+from diffusers.utils.torch_utils import is_compiled_module
+# Accelerate
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import ProjectConfiguration, set_seed
+# Torch
+import torch
+from torch.utils.data import Subset
+import torch.nn.functional as torch_func
+# Wandb
+import wandb 
+
+sys.path.append("src")
+import conf
+
+# Directory in which the project is stored
+PROJ_DIR = conf.PROJ_DIR
+sys.path.append(PROJ_DIR + "/src")
+sys.path.append(PROJ_DIR + "/src/audioldm")
+sys.path.append(PROJ_DIR + "/src/art2mus")
+
+import art2mus.utils.torch_tools as tt
+from art2mus.utils.imagebind_utils import load_model
+from art2mus.utils.train_test_argparse import parse_train_args
+
 from my_dataset import ImageAudioDataset
-from src.art2mus.art2mus_4_pipeline import AudioLDM2Pipeline
 import art2mus.utils.train_test_utils as tu
+from src.art2mus.art2mus_4_pipeline import AudioLDM2Pipeline
+
 
 
 class Art2MusTrainFlow(FlowSpec):
     
     AUDIOLDM_REPO = tu.AUDIOLDM2_REPO_ID
     CUSTOM_PIPE = tu.CUSTOM_PIPE_2
+    EMBEDS_DTYPE = torch.float16
+    use_snr_gamma = False
+    use_large_batch_size = True
+    use_training_subset = False
+    use_val_subset = False
+    use_cpu = False
+    res_from_checkpoint = False
+    skip_train = False
+    set_seed(0)
+    LAYER_WEIGHTS = tu.IMG_PROJ_LAYER_WEIGHTS
+    num_epochs = 3
+    MODEL_OUT_DIR = tu.MODEL_OUT_DIR
+    LOG_DIR = tu.LOG_DIR
+
+    
+    accelerator_project_conf = ProjectConfiguration(MODEL_OUT_DIR, LOG_DIR)
+    BATCH_SIZE = 2
+    gradient_accumulation_steps = 2 // BATCH_SIZE
+    
+    max_eval_audios = 101 + (num_epochs * 100) 
+
+    accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps,
+                              project_config=accelerator_project_conf,
+                              log_with="wandb",
+                              cpu=use_cpu,
+                              )
+    
+    device = 'cuda'
+    using_cuda = True
+
+    
     
     @step
     def start(self):
@@ -33,15 +103,80 @@ class Art2MusTrainFlow(FlowSpec):
         self.pipe = AudioLDM2Pipeline.from_pretrained(pretrained_model_name_or_path=self.AUDIOLDM_REPO,
                                                       custom_pipeline=self.CUSTOM_PIPE,)
     
-  
-        
-        self.next(self.train_model)
+        self.pipe = self.pipe.to(self.device)
+        self.generator = torch.Generator(self.device).manual_seed(0)
 
+        self.pipe.img_project_model.requires_grad_(True) 
+        self.pipe.projection_model.requires_grad_(False)
+        self.pipe.text_encoder_2.requires_grad_(False)
+        self.pipe.language_model.requires_grad_(False) 
+        self.pipe.text_encoder.requires_grad_(False)    
+        self.pipe.vocoder.requires_grad_(False)
+        self.pipe.unet.requires_grad_(False)
+        self.pipe.vae.requires_grad_(False)       
+    
+        self.pipe.img_project_model.train()
+        self.pipe.unet.eval()
+        
+        self.noise_scheduler = self.pipe.scheduler
+        
+        self.train_dataloader = torch.utils.data.DataLoader(self.train_data,
+                                                   batch_size=self.BATCH_SIZE, 
+                                                   shuffle=True,
+                                                   num_workers=4,)
+
+        self.val_dataloader = torch.utils.data.DataLoader(self.val_data, 
+                                                    batch_size=self.BATCH_SIZE, 
+                                                    shuffle=True,
+                                                    num_workers=4,)
+    
+    
+        update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
+        if self.max_train_steps is None:
+                self.max_train_steps = self.num_epochs * update_steps_per_epoch
+
+        # Update the number of traning epochs based on the no. update steps per epoch
+        self.num_epochs = math.ceil(self.max_train_steps / update_steps_per_epoch)
+    
+        self.optimizer_cls = torch.optim.AdamW
+        
+        self.optimizer = self.optimizer_cls(
+            self.pipe.img_project_model.parameters(),
+            lr=2e-5,
+            betas=(0.9, 0.999),
+            weight_decay=e-2,
+            eps=1e-08,
+        )
+
+        self.lr_scheduler = get_scheduler(
+                self.lr_scheduler,
+                optimizer=optimizer,
+                num_warmup_steps=self.lr_warmup_steps * self.num_processes,
+                num_training_steps=self.max_train_steps * self.accelerator.num_processes,
+            )
+
+        
+        self.pipe.img_project_model, optimizer, train_dataloader, val_dataloader, lr_scheduler = self.accelerator.prepare(
+            self.pipe.img_project_model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        )
+
+        # Load Short-Time Fourier Transform (STFT) module 
+        self.stft = tu.load_stft()
+        self.target_length = int(10 * 102.4)
+
+        # Number of completed train and validation steps 
+        self.global_step = 0
+        self.completed_val_steps = 0
+        self.first_epoch = 0
+        
+        
+        # Fan out to process each batch independently
+        self.next(self.process_batch, foreach="batch_indices")
 
     @step
     def train(self):
         
-        for epoch in tqdm(range(first_epoch, TRAIN_CONFIG.num_epochs), desc="Training epochs"):
+        for epoch in tqdm(range(0, 3), desc="Training epochs"):
             
             # Training step loss
             train_step_loss = 0.0
@@ -101,7 +236,7 @@ class Art2MusTrainFlow(FlowSpec):
                     
                     """ --- Noisy Latents Computation --- """
                     # Add noise to previously computed latents (fed in input to the UNet)
-                    noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+                self.next(self.end)    noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
                     noisy_latents = noisy_latents.to(device=device)
                     
                     # TODO: #3
@@ -109,9 +244,9 @@ class Art2MusTrainFlow(FlowSpec):
                     generated_noise, _ = pipe.__train__(
                         image_embeds=image_emb,
                         negative_prompt=negative_prompt,
-                        num_waveforms_per_prompt=TRAIN_CONFIG.no_waveforms_per_prompt,
+                        num_waveforms_per_prompt=self.no_waveforms_per_prompt,
                         latents=noisy_latents,
-                        guidance_scale=TRAIN_CONFIG.guidance_scale,
+                        guidance_scale=self.guidance_scale,
                         timesteps=timesteps,
                     )
 
@@ -150,7 +285,7 @@ class Art2MusTrainFlow(FlowSpec):
                         Signal to Noise Ratio Loss.
                         """
                         snr = compute_snr(noise_scheduler, timesteps)
-                        mse_loss_weights = torch.stack([snr, TRAIN_CONFIG.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
+                        mse_loss_weights = torch.stack([snr, self.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
                             dim=1
                         )[0]
                         mse_loss_weights = mse_loss_weights / snr
@@ -180,13 +315,13 @@ class Art2MusTrainFlow(FlowSpec):
                     # Gather losses across all processes for logging (if distributed training is used)
                     avg_loss = accelerator.gather(loss.repeat(BATCH_SIZE)).mean()
                     # Update step and epoch loss
-                    train_step_loss += avg_loss.item() / TRAIN_CONFIG.gradient_accumulation_steps
+                    train_step_loss += avg_loss.item() / self.gradient_accumulation_steps
                     epoch_loss += train_step_loss
                     
                     # Backpropagate the computed loss
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(pipe.img_project_model.parameters(), TRAIN_CONFIG.max_grad_norm)
+                        accelerator.clip_grad_norm_(pipe.img_project_model.parameters(), self.max_grad_norm)
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
@@ -202,18 +337,18 @@ class Art2MusTrainFlow(FlowSpec):
                     # Reset step loss
                     train_step_loss = 0.0
                     
-                    if global_step % TRAIN_CONFIG.checkpointing_steps == 0:
+                    if global_step % self.checkpointing_steps == 0:
                         if accelerator.is_main_process:
                             print(f"Storing checkpoint!\n=========================")
                             # Check if this save would set us over the `checkpoints_total_limit`
-                            if TRAIN_CONFIG.checkpoints_total_limit is not None:
-                                checkpoints = os.listdir(TRAIN_CONFIG.checkpoint_output_dir)
+                            if self.checkpoints_total_limit is not None:
+                                checkpoints = os.listdir(self.checkpoint_output_dir)
                                 checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                                 checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
                                 # Before saving the new checkpoint, we need remove some of the stored ones
-                                if len(checkpoints) >= TRAIN_CONFIG.checkpoints_total_limit:
-                                    num_to_remove = len(checkpoints) - TRAIN_CONFIG.checkpoints_total_limit + 1
+                                if len(checkpoints) >= self.checkpoints_total_limit:
+                                    num_to_remove = len(checkpoints) - self.checkpoints_total_limit + 1
                                     removing_checkpoints = checkpoints[0:num_to_remove]
                                     logger.info(
                                         f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
@@ -221,11 +356,11 @@ class Art2MusTrainFlow(FlowSpec):
                                     logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
                                     for removing_checkpoint in removing_checkpoints:
-                                        removing_checkpoint = os.path.join(TRAIN_CONFIG.checkpoint_output_dir, removing_checkpoint)
+                                        removing_checkpoint = os.path.join(self.checkpoint_output_dir, removing_checkpoint)
                                         shutil.rmtree(removing_checkpoint)
 
                             # Store checkpoint
-                            save_path = os.path.join(TRAIN_CONFIG.checkpoint_output_dir, f"checkpoint-{global_step}")
+                            save_path = os.path.join(self.checkpoint_output_dir, f"checkpoint-{global_step}")
                             accelerator.save_state(save_path)
                             logger.info(f"Saved state to {save_path}")
                     
@@ -234,7 +369,7 @@ class Art2MusTrainFlow(FlowSpec):
                 progress_bar.set_postfix(**logs)
                 
                 # Check if the training loop needs to be stopped
-                if global_step >= TRAIN_CONFIG.max_train_steps:
+                if global_step >= self.max_train_steps:
                     break
                 elif accelerator.sync_gradients and global_step > 0 and (global_step % no_steps_per_epoch) == 0:
                     break
@@ -246,7 +381,7 @@ class Art2MusTrainFlow(FlowSpec):
                                  "train/step": global_step})
             
                 # Store epoch checkpoint
-                save_path = os.path.join(TRAIN_CONFIG.checkpoint_output_dir, f"checkpoint-{global_step}")
+                save_path = os.path.join(self.checkpoint_output_dir, f"checkpoint-{global_step}")
                 accelerator.save_state(save_path)
                 
                 print(f"***************************************************\n"
@@ -275,7 +410,7 @@ class Art2MusTrainFlow(FlowSpec):
                     
                     total_instances = val_dataloader.__len__()
                     instance_completed = 0
-                    noise_scheduler.set_timesteps(TRAIN_CONFIG.num_inference_steps)
+                    noise_scheduler.set_timesteps(self.num_inference_steps)
 
                     for step, batch in enumerate(val_dataloader):
                         print(f"Currently: {instance_completed}/{total_instances} instances")
@@ -292,22 +427,22 @@ class Art2MusTrainFlow(FlowSpec):
                             gen_music = pipe(
                                 image_embeds=image_emb,
                                 negative_prompt=NEGATIVE_PROMPT,
-                                num_inference_steps=TRAIN_CONFIG.num_inference_steps,
-                                audio_length_in_s=TRAIN_CONFIG.audio_duration_in_seconds,
-                                num_waveforms_per_prompt=TRAIN_CONFIG.no_waveforms_per_prompt,
+                                num_inference_steps=self.num_inference_steps,
+                                audio_length_in_s=self.audio_duration_in_seconds,
+                                num_waveforms_per_prompt=self.no_waveforms_per_prompt,
                                 generator=generator,
-                                guidance_scale=TRAIN_CONFIG.guidance_scale,
+                                guidance_scale=self.guidance_scale,
                             ).audios
 
                             # Empty folder after 500 music files have been stored [avoid storing too many files at once]
-                            if TRAIN_CONFIG.eval_audios == 500:
+                            if self.eval_audios == 500:
                                 tu.empty_folder(VAL_AUDIO_DIR)
-                                TRAIN_CONFIG.eval_audios = 0
+                                self.eval_audios = 0
 
-                            if TRAIN_CONFIG.eval_audios < TRAIN_CONFIG.max_eval_audios:
-                                generated_audio_path = VAL_AUDIO_DIR + f"val_audio_{TRAIN_CONFIG.eval_audios}.wav"
+                            if self.eval_audios < self.max_eval_audios:
+                                generated_audio_path = VAL_AUDIO_DIR + f"val_audio_{self.eval_audios}.wav"
                                 scipy.io.wavfile.write(generated_audio_path, rate=16000, data=gen_music[0])
-                                TRAIN_CONFIG.eval_audios += 1
+                                self.eval_audios += 1
                             
                                 # Create Wandb artifact with artwork and generated audio, and log it
                                 wandb_artifact = create_artifact(img_path, generated_audio_path, completed_val_steps)
