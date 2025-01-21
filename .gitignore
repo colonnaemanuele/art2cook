@@ -3,5 +3,7 @@
 
 # Avoid pushing wandb logs
 wandb/*
+.venv/
+mlruns/
 
 __pycache__/
