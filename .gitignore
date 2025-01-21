@@ -7,3 +7,9 @@ wandb/*
 mlruns/
 
 __pycache__/
+
+
+data/*
+
+.metaflow/
+launch.json

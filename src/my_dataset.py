@@ -69,11 +69,9 @@ def remove_substring(string, data_type):
         - str: The string with a specified substring removed.
     """
     if data_type == 'image':
-        substring = "imagesf2/"
+        return string
     else:
-        substring = "fma-dataset-100k-music-wav-files/fma_large/"
-        
-    return string.split(substring)[1]
+        return string
 
 
 def read_safetensor(file_path, data_type):
@@ -97,8 +95,7 @@ def read_safetensor(file_path, data_type):
     new_dict = {}
 
     for key, value in tensors.items():
-        new_key = remove_substring(key, data_type)
-        new_dict[new_key] = value
+        new_dict[key] = value
         
     return new_dict
 
@@ -267,7 +264,7 @@ class ImageAudioDataset(Dataset):
             
             # Determine the test size based on the desired number of elements in val_indices
             """ ---- We decided to work with only 100 validation instances ---- """
-            desired_val_size = 100
+            desired_val_size = 10
             total_indices = len(test_indices)
             test_size = max(0, total_indices - desired_val_size) / total_indices
             
