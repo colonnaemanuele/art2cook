@@ -9,7 +9,7 @@ import conf
 
 # Directory in which the project is stored
 PROJ_DIR = conf.PROJ_DIR
-sys.path.append(PROJ_DIR + "/src/audioldm")
+sys.path.append(os.path.join(PROJ_DIR, "src/audioldm"))
 
 import scipy
 import torch
