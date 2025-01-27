@@ -125,7 +125,7 @@ class Art2MusTrainFlow(FlowSpec):
             0, self.pipe.scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device
         ).long()
         noisy_latents = self.pipe.scheduler.add_noise(latents, noise, timesteps).to(self.device)
-
+        
         return noisy_latents, timesteps, noise
     
     
@@ -215,12 +215,11 @@ class Art2MusTrainFlow(FlowSpec):
                                                             batch_size=self.BATCH_SIZE, 
                                                             shuffle=True,
                                                             num_workers=4,)
-
+        
         self.val_dataloader = torch.utils.data.DataLoader(self.val_data, 
                                                           batch_size=self.BATCH_SIZE, 
                                                           shuffle=True,
                                                           num_workers=4,)
-    
     
         update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
         if self.max_train_steps is None:
@@ -237,14 +236,16 @@ class Art2MusTrainFlow(FlowSpec):
 
         self.lr_scheduler = get_scheduler(
                 self.lr_scheduler,
-                optimizer=optimizer,
+                optimizer=self.optimizer,
                 num_warmup_steps=self.lr_warmup_steps * self.num_processes,
                 num_training_steps=self.max_train_steps * self.accelerator.num_processes,
             )
 
-        self.pipe.img_project_model, optimizer, train_dataloader, val_dataloader, lr_scheduler = self.accelerator.prepare(
-            self.pipe.img_project_model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        print('fac')
+        self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.val_dataloader, self.lr_scheduler = self.accelerator.prepare(
+            self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.val_dataloader, self.lr_scheduler
         )
+        print('iola3')
 
         self.stft = tu.load_stft()
         self.target_length = int(10 * 102.4)
@@ -253,239 +254,66 @@ class Art2MusTrainFlow(FlowSpec):
         self.completed_val_steps = 0
         self.first_epoch = 0
         
-        """
-        Batches:
-        - self.train_dataloader
-        - self.val_dataloader
-        """
-        
-        # Fan out to process each batch independently
-        self.next(self.process_batch, foreach="batch_indices")
-
-    """
-    ####################################################################
-    TRAINING HEREEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
-    ####################################################################
-    """
-    @step
-    def train(self):
-        
-        no_steps_per_epoch = len(self.train_dataloader) // self.gradient_accumulation_steps
-        print(f"Will check if epochs has to end after {no_steps_per_epoch} steps.\n\n")
-        
-        progress_bar = tqdm(
-                    range(0, self.max_train_steps),
-                    initial=0,
-                    desc="Current step (w.r.t. max train steps)",
-                    disable=not self.accelerator.is_local_main_process,
-                )
-        
-        for epoch in tqdm(range(0, self.num_epochs), desc="Training epochs"):
-            
-            epoch_loss = 0.0
-            train_step_loss = 0.0
-            validation_done = False
-            self.noise_scheduler.set_timesteps(self.pipe.scheduler.config.num_train_timesteps)
-            
-            for _, batch in enumerate(self.train_dataloader):
-                            
-                # Skip first train epoch if needed
-                if skip_train:
-                    break
-                
-                with self.accelerator.accumulate(self.pipe.img_project_model):
-                                    
-                    image_emb, audio_path = batch
-                    
-                    negative_prompt = self.prepare_negative_prompt(image_emb.shape[0])
-                    
-                    # TODO: #1
-                    """ --- Convert audio to mel spectrogram --- """
-                    mel = self.process_audio(audio_path)
-                    
-                    """ --- Compute latents starting from the mel-spectrogram --- """
-                    noisy_latents, timesteps, noise = self.generate_noisy_latents_and_noise(mel)
-                    target = noise
-         
-                    # TODO: #3
-                    """ --- Noise Generation Procedure --- """
-                    generated_noise = self.generate_noise(image_emb, 
-                                                          negative_prompt, 
-                                                          self.no_waveforms_per_prompt,
-                                                          noisy_latents, 
-                                                          self.guidance_scale,
-                                                          timesteps)  
-
-                    # TODO: #4
-                    """ --- Loss Computation --- """
-                    # Removed SNR Gamma loss computation (ease out the code)
-                    loss = self.compute_loss(generated_noise, target, timesteps, self.ts_loss_dict)
-                        
-                    # TODO: #5
-                    avg_loss = self.accelerator.gather(loss.repeat(self.BATCH_SIZE)).mean()
-                    train_step_loss += avg_loss.item() / self.gradient_accumulation_steps
-                    epoch_loss += train_step_loss
-                    
-                    self.optimizer_step(loss)
-                    
-                # Checks if the accelerator has performed an optimization step
-                if self.accelerator.sync_gradients:
-                    
-                    progress_bar.update(1)
-                    global_step += 1
-                                    
-                    # Reset step loss
-                    train_step_loss = 0.0
-                    
-                    if global_step % self.checkpointing_steps == 0:
-                        if self.accelerator.is_main_process:
-                            print(f"Storing checkpoint!\n=========================")
-                            # Check if this save would set us over the `checkpoints_total_limit`
-                            if self.checkpoints_total_limit is not None:
-                                checkpoints = os.listdir(self.checkpoint_output_dir)
-                                checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                                checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                                # Before saving the new checkpoint, we need remove some of the stored ones
-                                if len(checkpoints) >= self.checkpoints_total_limit:
-                                    num_to_remove = len(checkpoints) - self.checkpoints_total_limit + 1
-                                    removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                    for removing_checkpoint in removing_checkpoints:
-                                        removing_checkpoint = os.path.join(self.checkpoint_output_dir, removing_checkpoint)
-                                        shutil.rmtree(removing_checkpoint)
-
-                            # Store checkpoint
-                            save_path = os.path.join(self.checkpoint_output_dir, f"checkpoint-{global_step}")
-                            self.accelerator.save_state(save_path)
-                    
-                # Update train progress bar
-                logs = {"step_loss": loss.detach().item(), "lr": self.lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
-                
-                # Check if the training loop needs to be stopped
-                if global_step >= self.max_train_steps:
-                    break
-                elif self.accelerator.sync_gradients and global_step > 0 and (global_step % no_steps_per_epoch) == 0:
-                    break
-           
-            # Compute epoch's loss
-            if not skip_train:
-                epoch_loss = epoch_loss / len(self.train_dataloader)
-                save_path = os.path.join(self.checkpoint_output_dir, f"checkpoint-{global_step}")
-                self.accelerator.save_state(save_path)
-                
-                print(f"Training epoch {epoch} completed! Starting validation....")      
-            else:
-                print(f"Skipped first epoch! Starting validation....")
-                skip_train = False        
-
-            """
-            Run validation after each training epoch.
-            """
-            # Total epoch loss
-            val_fad_score = 0.0
-            val_imgbind_score_am = 0.0
-            val_imgbind_score_mm = 0.0
-            val_kl_div = 0.0
-            
-            if self.accelerator.is_main_process:
-                if self.val_dataloader is not None and validation_done == False:
-                    
-                    total_instances = self.val_dataloader.__len__()
-                    instance_completed = 0
-                    self.noise_scheduler.set_timesteps(self.num_inference_steps)
-
-                    for step, batch in enumerate(self.val_dataloader):
-                        print(f"Currently: {instance_completed}/{total_instances} instances")
-                        with torch.no_grad():
-                            
-                            image_emb, audio_path = batch
-                            audio_path = audio_path[0]
-                            
-                            # Retrieve image path based on image embedding (needed to log Wandb artifact)
-                            img_path = self.dataset.__get_image_name_from_emb__(image_emb.cpu().detach())
-                            gt_aud_emb = self.dataset.__get_aud_emb_from_path__(audio_path)
-                            
-                            """ --- Inference - Audio Generation --- """                    
-                            gen_music = self.generate_validation_audio(image_emb, self.NEGATIVE_PROMPT, self.generator)
-
-                            # Empty folder after 500 music files have been stored [avoid storing too many files at once]
-                            if self.eval_audios == 500:
-                                tu.empty_folder(self.VAL_AUDIO_DIRv)
-                                self.eval_audios = 0
-
-                            if self.eval_audios < self.max_eval_audios:
-                                generated_audio_path = self.VAL_AUDIO_DIRv + f"val_audio_{self.eval_audios}.wav"
-                                scipy.io.wavfile.write(generated_audio_path, rate=16000, data=gen_music[0])
-                                self.eval_audios += 1
-                            
-                            """ --- Metrics Computation ---"""
-                            kl_div = tu.compute_kl_div(audio_path, generated_audio_path)
-                            imgbind_score_am, imgbind_score_mm = tu.compute_imagebind_score(image_embedding=image_emb,
-                                                                                            gt_audio_emb=gt_aud_emb, 
-                                                                                            generated_audio=gen_music,
-                                                                                            imagebind_model=self.IMAGEBIND, 
-                                                                                            tmp_gen_audio_dir=self.TMP_DIR_GT)
-                            if self.using_cuda:
-                                
-                                # Copy files before computing FAD score
-                                shutil.copy(audio_path, self.TMP_DIR_GT)
-                                shutil.copy(generated_audio_path, self.TMP_DIR_GEN)
-                                
-                                try:
-                                    fad_score = tu.calculate_fad(ground_truth_dir_path=self.TMP_DIR_GT,
-                                                                 generated_audio_dir_path=self.TMP_DIR_GEN,
-                                                                 load_from_local=True)
-                                    val_fad_score += fad_score
-                                except Exception as _:
-                                    fad_score=None
-                                
-                                # Remove files after computing FAD score
-                                tu.empty_folder(self.TMP_DIR_GT)
-                                tu.empty_folder(self.TMP_DIR_GEN)
-                            
-                            else:
-                                fad_score = None
-                            
-                            val_imgbind_score_am += imgbind_score_am
-                            val_imgbind_score_mm += imgbind_score_mm
-                            val_kl_div += kl_div
-                            
-                            instance_completed += 1
-                            completed_val_steps += 1
-                            
-                    # Validation completed
-                    validation_done = True
-                    print(f"***************************************************\n"
-                          f"Validation for epoch {epoch} completed!\n"
-                          f"***************************************************\n"
-                          )
-                                        
-                    # Log average validation metrics after each validation
-                    # If no fad score was computed, we have val_fad_score == 0.0
-                    val_fad_score = val_fad_score / len(self.val_dataloader)
-                    val_imgbind_score_am = val_imgbind_score_am / len(self.val_dataloader)
-                    val_imgbind_score_mm = val_imgbind_score_mm / len(self.val_dataloader)
-                    val_kl_div = val_kl_div / len(self.val_dataloader)
-                    
-                    # Reset these metrics values after logging them
-                    val_fad_score = 0.0
-                    val_imgbind_score_am = 0.0
-                    val_imgbind_score_mm = 0.0
-                    val_kl_div = 0.0
-        
-        print('the data artifact is still: %s' % self.my_var)
+        self.batch_indices = list(range(len(self.train_dataloader)))
         self.next(self.end)
-
-    @step
-    def train(self):
-        print('Training model...')
-        print('dataset is:', self.dataset)
-        self.next(self.end)
-
+    
+    # @step
+    # def train(self):
+    #     no_steps_per_epoch = len(self.train_dataloader) // self.gradient_accumulation_steps
+    #     print(f"Will check if epochs has to end after {no_steps_per_epoch} steps.\n\n")
+    #     self.progress_bar = tqdm(
+    #         range(0, self.max_train_steps),
+    #         initial=0,
+    #         desc="Current step (w.r.t. max train steps)",
+    #         disable=not self.accelerator.is_local_main_process,
+    #     )
+    #     self.num_epochs = list(range(self.first_epoch, self.num_epochs))
+    #     self.next(self.train_epoch, foreach='num_epochs')
+    
+    # @step
+    # def train_epoch(self):
+    #     self.train_step_loss = 0.0
+        
+    #     for _, batch in enumerate(self.train_dataloader):
+    #         image_emb, audio_path = batch
+    #         negative_prompt = self.prepare_negative_prompt(image_emb.shape[0])
+            
+    #         # TODO: #1
+    #         """ --- Convert audio to mel spectrogram --- """
+    #         mel = self.process_audio(audio_path)
+            
+    #         """ --- Compute latents starting from the mel-spectrogram --- """
+    #         noisy_latents, timesteps, noise = self.generate_noisy_latents_and_noise(mel)
+    #         target = noise
+    #         # TODO: #3
+    #         """ --- Noise Generation Procedure --- """
+    #         generated_noise = self.generate_noise(image_emb, 
+    #                                                 negative_prompt, 
+    #                                                 self.no_waveforms_per_prompt,
+    #                                                 noisy_latents, 
+    #                                                 self.guidance_scale,
+    #                                                 timesteps)
+    #         # Removed SNR Gamma loss computation (ease out the code)
+    #         loss = self.compute_loss(generated_noise, target, timesteps, self.ts_loss_dict)
+                
+    #         # TODO: #5
+    #         avg_loss = self.accelerator.gather(loss.repeat(self.BATCH_SIZE)).mean()
+    #         self.train_step_loss += avg_loss.item() / self.gradient_accumulation_steps
+    #         self.epoch_loss += self.train_step_loss
+            
+    #         self.optimizer_step(loss)
+    #         self.progress_bar.update(1)
+    #     self.next(self.join_training)
+        
+        
+    # @step
+    # def join_training(self, inputs):
+    #     self.loss = sum(inputs.loss)
+    #     self.next(self.end)
+  
     @step
     def end(self):
+        print(f'Loss: {self.loss}')
         print("Done training!")
 
 
