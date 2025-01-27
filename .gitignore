@@ -1,3 +1,17 @@
+# Dataset folder
+data/*
+
+# Images
+*.jpg
+*.jpeg
+*.png
+
+# Audio
+*.wav
+*.mp3
+*.mp4
+
+# Model and embeddings
 *.safetensors
 *.pth
 
@@ -9,10 +23,7 @@ mlruns/
 
 __pycache__/
 
-
-data/*
-
+# Other tools
 .dvc
-
 .metaflow/
 launch.json
