@@ -10,7 +10,7 @@ from art2mus.art2mus_4_pipeline import AudioLDM2Pipeline
 import art2mus.utils.train_test_utils as tu
 
 
-def generate_audio(prompt=None, img_path=None, img_emb=None, neg_prompt="Low quality.",
+def generate_audio(pipe, prompt=None, img_path=None, img_emb=None, neg_prompt="Low quality.",
                    inf_steps=200, aud_len=10.0, waveforms=3,
                    output_dir=PROJ_DIR, file_name="techno.wav"):
     
@@ -74,5 +74,5 @@ print(f"Pipeline moved to: {device}!")
 
 generator = torch.Generator(device).manual_seed(SEED)
 
-generate_audio(prompt=None, img_path=EXAMPLE_ARTWORK_PATH, img_emb=None, neg_prompt=NEG_PROMPT,
+generate_audio(pipe, prompt=None, img_path=EXAMPLE_ARTWORK_PATH, img_emb=None, neg_prompt=NEG_PROMPT,
                inf_steps=200, aud_len=10.0, waveforms=3, output_dir=OUT_DIR, file_name=f"/test_music/art2mus_example.wav")
