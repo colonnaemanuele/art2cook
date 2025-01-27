@@ -163,6 +163,9 @@ def generate_embeds(model, curr_dev='cpu',
         inputs = {
             ModalityType.TEXT: my_load_and_transform_text(text, curr_dev),
         }
+        
+    if not next(model.parameters()).is_cuda:
+        inputs = {k: v.cpu() for k, v in inputs.items()}
     
     with torch.no_grad():
         embeddings = model(inputs)
