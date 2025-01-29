@@ -1,4 +1,4 @@
-from metaflow import FlowSpec, step
+from metaflow import FlowSpec, step, catch
 from src.art2mus.art2mus_4_train import (
     ARTGRAPH_FOLDER,
     AUDIO_ST,
@@ -17,7 +17,6 @@ from PIL import Image
 from tqdm.auto import tqdm
 from datetime import datetime
 # Diffusers
-from diffusers.utils import is_wandb_available
 from diffusers.training_utils import compute_snr
 from diffusers.optimization import get_scheduler
 from diffusers.utils.torch_utils import is_compiled_module
@@ -78,9 +77,9 @@ class Art2MusTrainFlow(FlowSpec):
     use_training_subset = False
     res_from_checkpoint = False
     use_large_batch_size = True
-
+    max_train_steps = None
     num_epochs = 3
-    BATCH_SIZE = 2
+    BATCH_SIZE = 1
     max_grad_norm = 1.0
     audio_duration = 10
     guidance_scale = 3.5
@@ -178,10 +177,10 @@ class Art2MusTrainFlow(FlowSpec):
         ).audios
         return gen_music 
     
-    
+    @catch(var='val_dataloader')
     @step
     def start(self):
-        
+        print('Load dataset...')
         self.dataset = ImageAudioDataset(
             json_file=IMAGE_AUDIO_JSON,
             images_dir=ARTGRAPH_FOLDER,
@@ -192,6 +191,7 @@ class Art2MusTrainFlow(FlowSpec):
 
         self.train_data, self.val_data = self.dataset.train_val_test_split(val_size=0.2, random_state=0)
 
+        print('load pretrained')
         self.pipe = AudioLDM2Pipeline.from_pretrained(pretrained_model_name_or_path=self.AUDIOLDM_REPO,
                                                       custom_pipeline=self.CUSTOM_PIPE,)
     
@@ -206,26 +206,32 @@ class Art2MusTrainFlow(FlowSpec):
         self.pipe.vocoder.requires_grad_(False)
         self.pipe.unet.requires_grad_(False)
         self.pipe.vae.requires_grad_(False)       
-    
+        
         self.pipe.unet.eval()
         self.pipe.img_project_model.train()
         self.noise_scheduler = self.pipe.scheduler
-        
+        print('iola')
         self.train_dataloader = torch.utils.data.DataLoader(self.train_data,
                                                             batch_size=self.BATCH_SIZE, 
                                                             shuffle=True,
                                                             num_workers=4,)
+
+        print('iola2')
         
         self.val_dataloader = torch.utils.data.DataLoader(self.val_data, 
-                                                          batch_size=self.BATCH_SIZE, 
-                                                          shuffle=True,
-                                                          num_workers=4,)
-    
+                                                    batch_size=self.BATCH_SIZE, 
+                                                    shuffle=True,
+                                                    num_workers=2,)
+            
+        print('prima')
+        
         update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.gradient_accumulation_steps)
+        
         if self.max_train_steps is None:
                 self.max_train_steps = self.num_epochs * update_steps_per_epoch
+        print('dopo')
         self.num_epochs = math.ceil(self.max_train_steps / update_steps_per_epoch)
-    
+        print('load optimizer...')
         self.optimizer = torch.optim.AdamW(
             self.pipe.img_project_model.parameters(),
             lr=2e-5,
@@ -241,13 +247,11 @@ class Art2MusTrainFlow(FlowSpec):
                 num_training_steps=self.max_train_steps * self.accelerator.num_processes,
             )
 
-        print('fac')
+        print('pipe...')
         self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.val_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.val_dataloader, self.lr_scheduler
         )
-        print('iola3')
 
-        self.stft = tu.load_stft()
         self.target_length = int(10 * 102.4)
 
         self.global_step = 0
