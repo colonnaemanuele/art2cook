@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 CURR_FILE_PATH = os.path.abspath(__file__)
-PROJ_DIR = os.path.join(CURR_FILE_PATH.split('art2cook/')[0], 'art2cook')
+PROJ_DIR = os.path.join(CURR_FILE_PATH.split('art2cook')[0], 'art2cook')
 sys.path.append(PROJ_DIR)
 
 from test_art2mus import generate_music

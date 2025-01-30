@@ -4,7 +4,7 @@ import scipy
 import torch
 
 CURR_FILE_PATH = os.path.abspath(__file__)
-PROJ_DIR = os.path.join(CURR_FILE_PATH.split('art2cook/')[0], 'art2cook')
+PROJ_DIR = os.path.join(CURR_FILE_PATH.split('art2cook')[0], 'art2cook')
 SRC_DIR = os.path.join(PROJ_DIR, 'src')
 sys.path.append(PROJ_DIR)
 sys.path.append(SRC_DIR)
