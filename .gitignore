@@ -24,6 +24,5 @@ mlruns/
 __pycache__/
 
 # Other tools
-.dvc
 .metaflow/
 launch.json

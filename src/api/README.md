@@ -1,3 +1,7 @@
+## FastAPI 🐝
+
+[**FastAPI**](https://fastapi.tiangolo.com/) is a modern and fast web framework for building APIs with Python. This tool is employed in the [art2mus_api script](art2mus_api.py) in which, after initializing the FastAPI framework, we create the endpoint for our system functionality, which is Artwork-Based Music Generation.
+
 ## Run Art2Mus on your local machine 🖼️🎵
 
 > [!IMPORTANT]

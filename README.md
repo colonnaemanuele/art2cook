@@ -45,6 +45,16 @@ pip install -r requirements.txt
 > [!NOTE]
 > The final step may take some time due to the installation of various libraries.
 
+## Integrated Tools 🔨
+
+Various tools designed for specific tasks have been integrated into this project. For information about each tool, please refer to the following list:
+
+- **[Data Versioning](./.dvc/README.md)**: DVC
+- **[Experiment Tracking and ML Workflows Orchestration](...README.md)**: MLFlow and Metaflow
+- **[Quality Assessment (QA)](src/qa/README.md)**: Deepchecks and Pytest
+- **[API](src/api/README.md)**: FastAPI
+- **[Containerization](docker/README.md)**: Docker
+
 ## Run Art2Mus 🖼️🎵
 
 > [!IMPORTANT]
