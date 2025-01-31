@@ -1,3 +1,11 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", category=FutureWarning, module="audioldm")
+
 from metaflow import FlowSpec, step, catch
 from src.art2mus.art2mus_4_train import (
     ARTGRAPH_FOLDER,
@@ -48,26 +56,41 @@ from src.art2mus.art2mus_4_pipeline import AudioLDM2Pipeline
 # ImageBind stuff
 from art2mus.utils.imagebind_utils import load_model
 
+""" MLFlow Tracking using Dagshub  """
+# dagshub.init(repo_owner="colonnaemanuele", repo_name="art2cook", mlflow=True)
+# import mlflow
+# mlflow.start_run(run_name="Art2Cook__Training")
+
+from torch.optim.lr_scheduler import LambdaLR
+
+def constant_lr_lambda(_):
+    return 1.0
+
+def set_scheduler(optimizer, num_train_steps, num_warmup_steps, accelerator_no_processes):
+    return get_scheduler(
+                "constant",
+                optimizer=optimizer,
+                num_warmup_steps= num_warmup_steps * accelerator_no_processes,
+                num_training_steps= num_train_steps * accelerator_no_processes,
+            )
+
 class Art2MusTrainFlow(FlowSpec):
-    
-    # TRAIN_CONFIG = tu.TrainingConfig()
     
     set_seed(0)
     device = 'cuda'
     using_cuda = True
-    IMAGEBIND = load_model(False)
     stft = tu.load_stft()
+    IMAGEBIND = load_model(False)
     
     LOG_DIR = tu.LOG_DIR
     TMP_DIR_GT = tu.TMP_GT_DIR
+    EMBEDS_DTYPE = torch.float16
     TMP_DIR_GEN = tu.TMP_GEN_DIR
+    CUSTOM_PIPE = tu.CUSTOM_PIPE_2
     VAL_AUDIO_DIR = tu.VAL_AUDIO_DIR
     MODEL_OUT_DIR = tu.MODEL_OUT_DIR
-    LAYER_WEIGHTS = tu.IMG_PROJ_LAYER_WEIGHTS
-    
     AUDIOLDM_REPO = tu.AUDIOLDM2_REPO_ID
-    CUSTOM_PIPE = tu.CUSTOM_PIPE_2
-    EMBEDS_DTYPE = torch.float16
+    LAYER_WEIGHTS = tu.IMG_PROJ_LAYER_WEIGHTS
     
     use_cpu = False
     skip_train = False
@@ -76,12 +99,18 @@ class Art2MusTrainFlow(FlowSpec):
     use_training_subset = False
     res_from_checkpoint = False
     use_large_batch_size = True
-    max_train_steps = 120
-    num_epochs = 3
+    
+    num_epochs = 1
     BATCH_SIZE = 4
-    max_grad_norm = 1.0
+    global_step = 0
+    first_epoch = 0
     audio_duration = 10
+    max_grad_norm = 1.0
     guidance_scale = 3.5
+    lr_warmup_steps = 10
+    max_train_steps = 120
+    target_length =  1024
+    completed_val_steps = 0
     num_inference_steps = 200
     num_waveforms_per_prompt = 1
     audio_duration_in_seconds = 10.0
@@ -95,13 +124,6 @@ class Art2MusTrainFlow(FlowSpec):
                               project_config=accelerator_project_conf,
                               cpu=use_cpu,
                               )
-    lr_warmup_steps = 10
-    
-    global_step = 0
-    completed_val_steps = 0
-    first_epoch = 0
-    target_length =  1024 #int(10 * 102.4)
-
     
     TS_LIST = [10, 50, 100, 250, 500, 800]
     ts_loss_dict = {f'{ts_val}': [] for ts_val in TS_LIST}
@@ -183,7 +205,6 @@ class Art2MusTrainFlow(FlowSpec):
         ).audios
         return gen_music 
     
-    
     @step
     def start(self):
         self.dataset = ImageAudioDataset(
@@ -196,10 +217,7 @@ class Art2MusTrainFlow(FlowSpec):
 
         self.train_data, self.val_data = self.dataset.train_val_test_split(val_size=0.2, random_state=0)
         self.pipe = AudioLDM2Pipeline.from_pretrained(pretrained_model_name_or_path=self.AUDIOLDM_REPO,
-                                                      custom_pipeline=self.CUSTOM_PIPE,)
-    
-        self.pipe = self.pipe.to(self.device)
-        self.generator = torch.Generator(self.device).manual_seed(0)
+                                                      custom_pipeline=self.CUSTOM_PIPE,).to(self.device)
 
         self.pipe.img_project_model.requires_grad_(True) 
         self.pipe.projection_model.requires_grad_(False)
@@ -230,80 +248,83 @@ class Art2MusTrainFlow(FlowSpec):
             weight_decay=1e-2,
             eps=1e-08,
         )
+        
+        self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=constant_lr_lambda)
 
-        self.lr_scheduler = get_scheduler(
-                'constant',
-                optimizer=self.optimizer,
-                num_warmup_steps=self.lr_warmup_steps * self.accelerator.num_processes,
-                num_training_steps=self.max_train_steps * self.accelerator.num_processes,
-            )
-
+        # With this, dont ask me why, but metaflow will not be able to complete the run
+        # self.lr_scheduler = set_scheduler(self.optimizer, self.max_train_steps, self.lr_warmup_steps, self.accelerator.num_processes)
 
         self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.pipe.img_project_model, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
         self.batch_indices = list(range(len(self.train_dataloader)))
-        print('go to traiiin!')
+        print('========= ######### SOMEBODY IS GONNA TRAIN NOW EH? ######### =========')
         self.next(self.train)
     
     @step
     def train(self):
-        print('succhiatemi il train')
+        print('SHOULD BE TRAINING JESUS CHRIST')
+        
         no_steps_per_epoch = len(self.train_dataloader) // self.gradient_accumulation_steps
         print(f"Will check if epochs has to end after {no_steps_per_epoch} steps.\n\n")
-        self.progress_bar = tqdm(
-            range(0, self.max_train_steps),
-            initial=0,
-            desc="Current step (w.r.t. max train steps)",
-            disable=not self.accelerator.is_local_main_process,
-        )
+        
+        # self.progress_bar = tqdm(
+        #     range(0, self.max_train_steps),
+        #     initial=0,
+        #     desc="Current step (w.r.t. max train steps)",
+        #     disable=not self.accelerator.is_local_main_process,
+        # )
+        
         self.num_epochs = list(range(self.first_epoch, self.num_epochs))
-        self.next(self.end)
-        # self.next(self.train_epoch, foreach='num_epochs')
+        print(f"Will train for {self.num_epochs} epochs.")
+        
+        # self.next(self.end)
+        self.next(self.train_epoch, foreach='num_epochs')
     
-    # @step
-    # def train_epoch(self):
-    #     print('Training epoch')
-    #     self.train_step_loss = 0.0
-    #     self.epoch_loss = 0.0
+    @step
+    def train_epoch(self):
+        print('RUNNIN THE SO CALLED TRAINING EPOCH')
         
-    #     for _, batch in enumerate(self.train_dataloader):
-    #         image_emb, audio_path = batch
-    #         negative_prompt = self.prepare_negative_prompt(image_emb.shape[0])
+        self.train_step_loss = 0.0
+        self.epoch_loss = 0.0
+        
+        for _, batch in enumerate(self.train_dataloader):
+            image_emb, audio_path = batch
+            negative_prompt = self.prepare_negative_prompt(image_emb.shape[0])
             
-    #         # TODO: #1
-    #         """ --- Convert audio to mel spectrogram --- """
-    #         mel = self.process_audio(audio_path)
+            """ --- Convert audio to mel spectrogram --- """
+            mel = self.process_audio(audio_path)
             
-    #         """ --- Compute latents starting from the mel-spectrogram --- """
-    #         noisy_latents, timesteps, noise = self.generate_noisy_latents_and_noise(mel)
-    #         target = noise
-    #         # TODO: #3
-    #         """ --- Noise Generation Procedure --- """
-    #         generated_noise = self.generate_noise(image_emb, 
-    #                                                 negative_prompt, 
-    #                                                 self.no_waveforms_per_prompt,
-    #                                                 noisy_latents, 
-    #                                                 self.guidance_scale,
-    #                                                 timesteps)
-    #         # Removed SNR Gamma loss computation (ease out the code)
-    #         loss = self.compute_loss(generated_noise, target, timesteps, self.ts_loss_dict)
+            """ --- Compute latents starting from the mel-spectrogram --- """
+            noisy_latents, timesteps, noise = self.generate_noisy_latents_and_noise(mel)
+            target = noise
+            
+            """ --- Noise Generation Procedure --- """
+            generated_noise = self.generate_noise(image_emb, 
+                                                    negative_prompt, 
+                                                    self.no_waveforms_per_prompt,
+                                                    noisy_latents, 
+                                                    self.guidance_scale,
+                                                    timesteps)
+            
+            # Loss computation
+            loss = self.compute_loss(generated_noise, target, timesteps, self.ts_loss_dict)
                 
-    #         # TODO: #5
-    #         avg_loss = self.accelerator.gather(loss.repeat(self.BATCH_SIZE)).mean()
-    #         self.train_step_loss += avg_loss.item() / self.gradient_accumulation_steps
-    #         self.epoch_loss += self.train_step_loss
+            avg_loss = self.accelerator.gather(loss.repeat(self.BATCH_SIZE)).mean()
+            self.train_step_loss += avg_loss.item() / self.gradient_accumulation_steps
+            self.epoch_loss += self.train_step_loss
             
-    #         self.optimizer_step(loss)
-    #         self.progress_bar.update(1)
-    #     self.next(self.join_training)
+            self.optimizer_step(loss)
+            self.global_step += 1
+                        
+        self.next(self.join_training)
         
         
-    # @step
-    # def join_training(self, inputs):
-    #     self.loss = sum(inputs.loss)
-    #     self.next(self.end)
-  
+    @step
+    def join_training(self, inputs):
+        self.loss = sum(inputs.loss)
+        self.next(self.end)
+    
     @step
     def end(self):
         print(f'Loss: {self.loss}')

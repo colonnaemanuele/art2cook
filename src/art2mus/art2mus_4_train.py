@@ -23,7 +23,13 @@ import torch.nn.functional as torch_func
 # Wandb
 import wandb 
 
-sys.path.append("src")
+# Get the current file path
+current_file_path = os.path.abspath(__file__)
+proj_dir = os.path.join(current_file_path.split('art2cook')[0], 'art2cook')
+src_dir = os.path.join(proj_dir, 'src')
+
+sys.path.append(proj_dir)
+sys.path.append(src_dir)
 import conf
 
 # Directory in which the project is stored

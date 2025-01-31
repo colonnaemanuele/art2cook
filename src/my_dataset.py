@@ -313,7 +313,7 @@ class ImageAudioDataset(Dataset):
         """        
         split_string = "fma_large/"
         if split_string in aud_path:
-            aud_path = aud_path.split(split_string)[1]
+            aud_path = aud_path.split(split_string)[-1]
 
         return self.audio_embeds[aud_path]
     
